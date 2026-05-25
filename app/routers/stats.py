@@ -125,3 +125,63 @@ async def get_summary():
         "default_limit":          settings.default_limit,
         "default_window_seconds": settings.default_window_seconds,
     }
+
+@router.get("/ip/{ip_address}")
+async def get_ip_stats(ip_address: str):
+    """
+    Get rate limit status for a specific IP address across all algorithms.
+    IP is stored with 'ip:' prefix in Redis.
+    """
+    client_id = f"ip:{ip_address}"
+
+    fw_count = await fixed_window.get_current_count(client_id)
+    sw_count = await sliding_window.get_current_count(client_id)
+    tb_tokens = await token_bucket.get_current_tokens(client_id)
+
+    from app.algorithms.leaky_bucket import get_queue_size
+    lb_queue = await get_queue_size(client_id)
+
+    return {
+        "ip_address": ip_address,
+        "client_id": client_id,
+        "fixed_window": {
+            "current_count": fw_count,
+            "limit": settings.default_limit,
+        },
+        "sliding_window": {
+            "current_count": sw_count,
+            "limit": settings.default_limit,
+        },
+        "token_bucket": {
+            "tokens_remaining": tb_tokens,
+            "capacity": settings.default_limit,
+        },
+        "leaky_bucket": {
+            "queue_size": lb_queue,
+            "capacity": settings.default_limit,
+        },
+    }
+
+
+@router.delete("/ip/{ip_address}")
+async def reset_ip(ip_address: str):
+    """Reset all rate limit state for an IP address."""
+    r = await get_redis()
+    client_id = f"ip:{ip_address}"
+
+    keys_to_delete = (
+        await r.keys(f"ratelimit:fixed:{client_id}:*") +
+        await r.keys(f"ratelimit:sliding:{client_id}") +
+        await r.keys(f"ratelimit:token:{client_id}:*") +
+        await r.keys(f"ratelimit:leaky:{client_id}:*")
+    )
+
+    if keys_to_delete:
+        await r.delete(*keys_to_delete)
+
+    return {
+        "reset": True,
+        "ip_address": ip_address,
+        "client_id": client_id,
+        "keys_deleted": len(keys_to_delete),
+    }
