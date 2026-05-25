@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     default_limit: int = 100
     default_window_seconds: int = 60
 
+    # Instance identification — useful for distributed setup
+    instance_id: str = "instance-1"
+
     model_config = {"env_file": ".env"}
 
 

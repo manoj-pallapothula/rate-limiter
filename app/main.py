@@ -79,3 +79,56 @@ async def demo_fixed(request: Request):
         "algorithm": "fixed_window",
         "identified_by": "X-Client-ID header",
     }
+
+@app.get("/distributed/info", tags=["Distributed"])
+async def distributed_info():
+    """
+    Shows which Redis instance this server is connected to.
+    In a distributed setup all servers should point to the same Redis.
+    """
+    import redis.asyncio as aioredis
+    from app.config import settings
+
+    r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+
+    try:
+        info = await r.info("server")
+        ping = await r.ping()
+        return {
+            "instance_id": settings.instance_id,
+            "redis_url": settings.redis_url,
+            "redis_connected": ping,
+            "redis_version": info.get("redis_version"),
+            "redis_uptime_seconds": info.get("uptime_in_seconds"),
+            "note": "All instances must share the same redis_url for distributed rate limiting to work"
+        }
+    except Exception as e:
+        return {
+            "instance_id": settings.instance_id,
+            "redis_url": settings.redis_url,
+            "redis_connected": False,
+            "error": str(e),
+        }
+
+
+@app.get("/distributed/test", tags=["Distributed"])
+async def distributed_test():
+    """
+    Test distributed rate limiting.
+    Hit this endpoint from multiple server instances to prove shared state.
+    """
+    import redis.asyncio as aioredis
+    from app.config import settings
+
+    r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+
+    key = "distributed:test:counter"
+    count = await r.incr(key)
+    await r.expire(key, 60)
+
+    return {
+        "instance_id": settings.instance_id,
+        "shared_counter": count,
+        "message": f"This request was handled by {settings.instance_id}. "
+                   f"Counter is shared across all instances.",
+    }
