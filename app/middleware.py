@@ -2,6 +2,7 @@ import functools
 from fastapi import Request, HTTPException
 from app.algorithms import fixed_window, sliding_window, token_bucket, leaky_bucket
 from app.config import settings
+from app.route_config import get_route_config
 
 
 ALGORITHMS = {
@@ -117,8 +118,24 @@ def rate_limit(
                     detail="Rate limit middleware requires Request parameter"
                 )
 
-            client_id = get_client_id(request, by=by)
-            result = await check_fn(client_id, _limit, _window)
+            # Check if route has DB config — overrides decorator values
+            route_path = request.url.path
+            db_config = await get_route_config(route_path)
+            if db_config:
+                _limit_actual = db_config["limit"]
+                _window_actual = db_config["window_seconds"]
+                _algo_actual = db_config["algorithm"]
+                _by_actual = db_config["by"]
+                check_fn_actual = ALGORITHMS.get(_algo_actual, check_fn)
+            else:
+                _limit_actual = _limit
+                _window_actual = _window
+                _algo_actual = algorithm
+                _by_actual = by
+                check_fn_actual = check_fn
+
+            client_id = get_client_id(request, by=_by_actual)
+            result = await check_fn_actual(client_id, _limit_actual, _window_actual)
 
             if not result.allowed:
                 raise HTTPException(
@@ -126,10 +143,11 @@ def rate_limit(
                     detail={
                         "error": "Rate limit exceeded",
                         "client_id": client_id,
-                        "algorithm": algorithm,
+                        "algorithm": _algo_actual,
                         "limit": result.limit,
                         "retry_after_seconds": result.retry_after,
                         "reset_at": result.reset_at,
+                        "config_source": "database" if db_config else "decorator",
                     },
                     headers={
                         "X-RateLimit-Limit": str(result.limit),

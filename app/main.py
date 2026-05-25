@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from app.routers.limiter import router as limiter_router
 from app.routers.stats import router as stats_router
 from app.middleware import rate_limit
-
+from app.routers.config import router as config_router
 
 app = FastAPI(
     title="Rate Limiter",
@@ -21,6 +21,7 @@ app.add_middleware(
 
 app.include_router(limiter_router)
 app.include_router(stats_router)
+app.include_router(config_router)
 
 
 @app.get("/", tags=["Root"])
