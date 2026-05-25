@@ -107,19 +107,21 @@ async def reset_client(client_id: str):
 
 
 @router.get("/summary")
+@router.get("/summary")
 async def get_summary():
-    """High level summary — total keys in Redis per algorithm."""
     r = await get_redis()
 
     fixed_keys   = await r.keys("ratelimit:fixed:*")
     sliding_keys = await r.keys("ratelimit:sliding:*")
     token_keys   = await r.keys("ratelimit:token:*:tokens")
+    leaky_keys   = await r.keys("ratelimit:leaky:*:queue")
 
     return {
-        "active_fixed_windows":    len(fixed_keys),
-        "active_sliding_windows":  len(sliding_keys),
-        "active_token_buckets":    len(token_keys),
-        "total_active":            len(fixed_keys) + len(sliding_keys) + len(token_keys),
-        "default_limit":           settings.default_limit,
-        "default_window_seconds":  settings.default_window_seconds,
+        "active_fixed_windows":   len(fixed_keys),
+        "active_sliding_windows": len(sliding_keys),
+        "active_token_buckets":   len(token_keys),
+        "active_leaky_buckets":   len(leaky_keys),
+        "total_active":           len(fixed_keys) + len(sliding_keys) + len(token_keys) + len(leaky_keys),
+        "default_limit":          settings.default_limit,
+        "default_window_seconds": settings.default_window_seconds,
     }
