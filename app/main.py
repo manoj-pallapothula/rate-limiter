@@ -5,6 +5,8 @@ from app.routers.limiter import router as limiter_router
 from app.routers.stats import router as stats_router
 from app.middleware import rate_limit
 from app.routers.config import router as config_router
+from app.jwt_auth import create_token, decode_token
+from app.middleware import rate_limit, rate_limit_jwt
 
 app = FastAPI(
     title="Rate Limiter",
@@ -132,4 +134,45 @@ async def distributed_test():
         "shared_counter": count,
         "message": f"This request was handled by {settings.instance_id}. "
                    f"Counter is shared across all instances.",
+    }
+
+# ── JWT demo endpoints ────────────────────────────────────────────────────────
+
+@app.post("/auth/token", tags=["Auth"])
+async def get_token(user_id: str):
+    """
+    Generate a JWT token for testing.
+    In production this would verify credentials first.
+    """
+    token = create_token(user_id)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user_id,
+        "note": "Include as: Authorization: Bearer {token}"
+    }
+
+
+@app.get("/demo/jwt-protected", tags=["Demo"])
+@rate_limit_jwt(anonymous_limit=3, authenticated_limit=20, window_seconds=60)
+async def demo_jwt(request: Request):
+    """
+    JWT-aware rate limiting demo.
+    Anonymous: 3 req/min
+    Authenticated: 20 req/min
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        payload = decode_token(token)
+        user_id = payload.get("sub") if payload else None
+    else:
+        user_id = None
+
+    return {
+        "message": "Request allowed",
+        "authenticated": user_id is not None,
+        "user_id": user_id or "anonymous",
+        "anonymous_limit": 3,
+        "authenticated_limit": 20,
     }

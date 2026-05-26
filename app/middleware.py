@@ -3,6 +3,7 @@ from fastapi import Request, HTTPException
 from app.algorithms import fixed_window, sliding_window, token_bucket, leaky_bucket
 from app.config import settings
 from app.route_config import get_route_config
+from app.jwt_auth import get_user_id_from_token
 
 
 ALGORITHMS = {
@@ -14,62 +15,50 @@ ALGORITHMS = {
 
 
 def extract_ip(request: Request) -> str:
-    """
-    Extract the real client IP from the request.
-
-    Checks headers in order:
-    1. X-Forwarded-For — set by load balancers and proxies
-    2. X-Real-IP — set by nginx
-    3. CF-Connecting-IP — set by Cloudflare
-    4. request.client.host — direct connection fallback
-
-    Always takes the first IP in X-Forwarded-For since that's
-    the original client. Later IPs are proxy hops.
-    """
-    # Cloudflare
+    """Extract real client IP handling proxies."""
     cf_ip = request.headers.get("CF-Connecting-IP")
     if cf_ip:
         return cf_ip.strip()
 
-    # nginx / most proxies
     real_ip = request.headers.get("X-Real-IP")
     if real_ip:
         return real_ip.strip()
 
-    # Load balancers — format: "client, proxy1, proxy2"
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
         return forwarded_for.split(",")[0].strip()
 
-    # Direct connection
     if request.client:
         return request.client.host
 
     return "unknown"
 
 
-def get_client_id(request: Request, by: str = "header") -> str:
-    """
-    Extract client identifier from the request.
-
-    by="ip"      — real IP with proxy support
-    by="header"  — X-Client-ID header
-    by="api_key" — X-API-Key header
-    """
+def get_client_id(request: Request, by: str = "ip") -> str:
+    """Extract client identifier from request."""
     if by == "ip":
         return f"ip:{extract_ip(request)}"
-
     elif by == "api_key":
         api_key = request.headers.get("X-API-Key")
         if not api_key:
-            raise HTTPException(
-                status_code=401,
-                detail="X-API-Key header required"
-            )
+            raise HTTPException(status_code=401, detail="X-API-Key header required")
         return f"apikey:{api_key}"
-
-    else:  # header (default)
+    else:
         return request.headers.get("X-Client-ID", "anonymous")
+
+
+def get_client_id_with_jwt(request: Request, by: str = "ip") -> tuple[str, str]:
+    """
+    Extract client ID considering JWT authentication.
+    Returns (client_id, auth_type) tuple.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        user_id = get_user_id_from_token(token)
+        if user_id:
+            return f"user:{user_id}", "jwt"
+    return get_client_id(request, by=by), by
 
 
 def rate_limit(
@@ -86,12 +75,6 @@ def rate_limit(
         @rate_limit(limit=100, window_seconds=60, algorithm="sliding_window")
         async def get_data(request: Request):
             return {"data": "..."}
-
-    Args:
-        limit:          Max requests in window
-        window_seconds: Window size in seconds
-        algorithm:      fixed_window, sliding_window, token_bucket, leaky_bucket
-        by:             ip, header, or api_key
     """
     _limit = limit or settings.default_limit
     _window = window_seconds or settings.default_window_seconds
@@ -118,7 +101,7 @@ def rate_limit(
                     detail="Rate limit middleware requires Request parameter"
                 )
 
-            # Check if route has DB config — overrides decorator values
+            # Check DB config — overrides decorator values
             route_path = request.url.path
             db_config = await get_route_config(route_path)
             if db_config:
@@ -158,6 +141,72 @@ def rate_limit(
                 )
 
             return await func(*args, **kwargs)
+        return wrapper
+    return decorator
 
+
+def rate_limit_jwt(
+    anonymous_limit: int = 10,
+    authenticated_limit: int = 100,
+    window_seconds: int = 60,
+    algorithm: str = "sliding_window",
+    by: str = "ip",
+):
+    """
+    JWT-aware rate limiter.
+    Anonymous users get anonymous_limit.
+    Authenticated users (valid JWT) get authenticated_limit.
+    """
+    check_fn = ALGORITHMS.get(algorithm)
+    if not check_fn:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            request = None
+            for arg in args:
+                if isinstance(arg, Request):
+                    request = arg
+                    break
+            if request is None:
+                request = kwargs.get("request")
+
+            if request is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Rate limit middleware requires Request parameter"
+                )
+
+            client_id, auth_type = get_client_id_with_jwt(request, by=by)
+
+            if auth_type == "jwt":
+                _limit = authenticated_limit
+                limit_type = "authenticated"
+            else:
+                _limit = anonymous_limit
+                limit_type = "anonymous"
+
+            result = await check_fn(client_id, _limit, window_seconds)
+
+            if not result.allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Rate limit exceeded",
+                        "client_id": client_id,
+                        "limit_type": limit_type,
+                        "limit": result.limit,
+                        "retry_after_seconds": result.retry_after,
+                        "reset_at": result.reset_at,
+                    },
+                    headers={
+                        "X-RateLimit-Limit": str(result.limit),
+                        "X-RateLimit-Remaining": str(result.remaining),
+                        "Retry-After": str(result.retry_after),
+                    }
+                )
+
+            return await func(*args, **kwargs)
         return wrapper
     return decorator
